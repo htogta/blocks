@@ -249,8 +249,7 @@ BlockFile* blockfile_from_file(const char* dest, const char* src_path) {
   BlockFile* bf = blockfile_open(dest);
   if (!bf) {
     fclose(src);
-    return blocks_fail_ptr(
-      "blockfile_from_file: failed to open dest as BlockFile");
+    return NULL; // blockfile_open already set a specific reason
   }
 
   uint8_t buffer[BLOCK_MAX_LENGTH];
@@ -260,16 +259,14 @@ BlockFile* blockfile_from_file(const char* dest, const char* src_path) {
     if (!bl) {
       fclose(src);
       blockfile_close(bf);
-      return blocks_fail_ptr(
-        "blockfile_from_file: failed to allocate new Block");
+      return NULL; // reason set by block_new
     }
 
     if (!block_append(bf, bl)) {
       block_free(bl);
       fclose(src);
       blockfile_close(bf);
-      return blocks_fail_ptr(
-        "blockfile_from_file: failed to append new Block");
+      return NULL; // reason set by block_append
     }
 
     block_free(bl);
@@ -321,10 +318,7 @@ int blockfile_clean(BlockFile* bf) {
 
   for (uint32_t read_index = 0; read_index < bf->count; read_index++) {
     Block* bl = block_read(bf, read_index);
-    if (!bl) {
-      blocks_fail("blockfile_clean: failed to read Block");
-      return -1;
-    }
+    if (!bl) return -1; // reason set by block_read
 
     if (block_is_empty(bl)) {
       removed++;
@@ -387,18 +381,12 @@ int blockfile_merge(BlockFile* to, const BlockFile* from) {
 
   for (uint32_t i = 0; i < original_count; i++) {
     Block* bl = block_read(from, i);
-    if (!bl) {
-      blocks_fail("blockfile_merge: failed to read Block from source");
-      return -1;
-    }
+    if (!bl) return -1; // reason set by block_read
 
     int ok = block_append(to, bl);
     block_free(bl);
 
-    if (!ok) {
-      blocks_fail("blockfile_merge: failed to append Block to destination");
-      return -1;
-    }
+    if (!ok) return -1; // reason set by block_append
     
     appended++;
   }
@@ -550,17 +538,13 @@ int block_clear(BlockFile* bf, uint32_t number) {
   }
 
   Block* empty_block = block_new(NULL, 0);
-  if (!empty_block) {
-    return blocks_fail("block_clear: failed to allocate empty Block");
-  } 
+  if (!empty_block) return 0; // reason set by block_new
 
   empty_block->number = number;
   int ok = block_update(bf, empty_block);
   block_free(empty_block);
 
-  if (!ok) return blocks_fail("block_clear: failed to update Block");
-
-  return ok;
+  return ok; // reason set by block_update
 }
 
 #endif // BLOCKS_IMPLEMENTATION
