@@ -23,7 +23,7 @@ typedef struct {
 // When a block is read from a file, it's always treated like it's 1024 bytes.
 typedef struct {
   uint32_t number;
-  uint8_t data[1024];
+  uint8_t data[BLOCK_MAX_LENGTH];
 } Block;
 
 // Opens a new blockfile- if it doesn't exist, one is created.
@@ -40,6 +40,9 @@ void blockfile_close(BlockFile* bf);
 // Removes all empty blocks, updating bf->count.
 // Returns the number of removed blocks on success (>= 0), or -1 on failure.
 int blockfile_clean(BlockFile* bf);
+// I would be careful using this function, 
+// as it won't preserve the relative positions of blocks.
+// Think of it like defragmenting a hard drive.
 
 // Copies the blocks from one file ("from") 
 // and appends them to the end of another ("to").
@@ -61,12 +64,12 @@ int block_append(BlockFile* bf, Block* bl);
 // Allocates for a block,
 // and reads its data from a blockfile at a specific location (number).
 // Returns null on failure.
-Block* block_read(BlockFile* bf, uint32_t number);
+Block* block_read(const BlockFile* bf, uint32_t number);
 
 // Overwrites a block at a specific location in a blockfile.
 // The location is determined by new_block->number.
 // Returns truthy upon success and falsy upon failure.
-int block_update(BlockFile* bf, Block* new);
+int block_update(BlockFile* bf, Block* new_block);
 
 // Overwrites a block with zeroes at a specific location in a blockfile.
 // Returns truthy upon success and falsy upon failure.
@@ -89,6 +92,21 @@ static char* blocks_strdup(const char* s) {
   if (!copy) return NULL;
   memcpy(copy, s, len);
   return copy;
+}
+
+// helper for writing the count to the header
+static int blockfile_write_count(BlockFile* bf) {
+  uint8_t count_bytes[4] = {
+    (uint8_t)(bf->count >> 24), (uint8_t)(bf->count >> 16),
+    (uint8_t)(bf->count >> 8),  (uint8_t)(bf->count)
+  };
+  
+  if (fseek(bf->fp, 3, SEEK_SET) != 0) return 0;
+  
+  if (fwrite(count_bytes, 1, 4, bf->fp) != 4) return 0;
+  
+  fflush(bf->fp);
+  return 1;
 }
 
 BlockFile* blockfile_open(const char* path) {
@@ -150,7 +168,52 @@ BlockFile* blockfile_open(const char* path) {
 }
 
 BlockFile* blockfile_from_file(const char* dest, const char* src_path) {
-  // TODO
+  if (!dest || !src_path) return NULL;
+
+  FILE* existing = fopen(dest, "rb");
+  if (existing) {
+    // dest already exists, so don't touch it
+    fclose(existing);
+    return NULL;
+  }
+
+  FILE* src = fopen(src_path, "rb");
+  if (!src) return NULL;
+
+  // NOTE: there's potential for a race condition here if, between running the
+  // above code and the code immediately below this, the file at "dest" is 
+  // created. I don't think that's a scenario I'd run into with my typical use
+  // of this library, but it's worth mentioning.
+
+  BlockFile* bf = blockfile_open(dest);
+  if (!bf) {
+    fclose(src);
+    return NULL;
+  }
+
+  uint8_t buffer[BLOCK_MAX_LENGTH];
+  size_t read_bytes;
+  while ((read_bytes = fread(buffer, 1, BLOCK_MAX_LENGTH, src)) > 0) {
+    Block* bl = block_new(buffer, read_bytes);
+
+    if (!bl || !block_append(bf, bl)) {
+      block_free(bl);
+      fclose(src);
+      blockfile_close(bf);
+      return NULL;
+    }
+
+    block_free(bl);
+  }
+
+  if (ferror(src)) {
+    fclose(src);
+    blockfile_close(bf);
+    return NULL;
+  }
+
+  fclose(src);
+  return bf;
 }
 
 void blockfile_close(BlockFile* bf) {
@@ -160,22 +223,82 @@ void blockfile_close(BlockFile* bf) {
   free(bf);
 }
 
+// helper for checking that a block is empty
+static int block_is_empty(const Block* bl) {
+  for (size_t i = 0; i < BLOCK_MAX_LENGTH; i++) {
+    if (bl->data[i] != 0) return 0;
+  }
+  return 1;
+}
+
 int blockfile_clean(BlockFile* bf) {
-  // TODO
+  if (!bf || !bf->fp) return -1;
+
+  uint32_t write_index = 0;
+  int removed = 0;
+
+  for (uint32_t read_index = 0; read_index < bf->count; read_index++) {
+    Block* bl = block_read(bf, read_index);
+    if (!bl) return -1;
+
+    if (block_is_empty(bl)) {
+      removed++;
+      block_free(bl);
+      continue;
+    }
+
+    if (write_index != read_index) {
+      // shift this block down to close the gap
+      long offset = block_offset(write_index);
+      if (fseek(bf->fp, offset, SEEK_SET) != 0 ||
+          fwrite(bl->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
+        block_free(bl);
+        return -1;
+      }
+    }
+
+    write_index++;
+    block_free(bl);
+  }
+
+  fflush(bf->fp);
+
+  bf->count = write_index;
+  if (!blockfile_write_count(bf)) return -1;
+
+  return removed;
 }
 
 int blockfile_merge(BlockFile* to, const BlockFile* from) {
-  // TODO
+  if (!to || !from || !to->fp || !from->fp) return -1;
+
+  uint32_t original_count = from->count;
+  uint32_t appended = 0;
+
+  for (uint32_t i = 0; i < original_count; i++) {
+    Block* bl = block_read(from, i);
+    if (!bl) return -1;
+
+    int ok = block_append(to, bl);
+    block_free(bl);
+
+    if (!ok) return -1;
+    appended++;
+  }
+
+  return (int)appended;
 }
 
 Block* block_new(const uint8_t* data, size_t length) {
+  if (length > BLOCK_MAX_LENGTH) return NULL;
+
   Block* bl = malloc(sizeof(Block));
   if (!bl) return NULL;
   
   bl->number = 0; // new blocks are initialized with number 0
 
   if (length == 0 && !data) { // creates empty block
-    for (size_t i = 0; i < BLOCK_MAX_LENGTH; i++) bl->data[i] = 0;
+    memset(bl->data, 0, BLOCK_MAX_LENGTH);
     return bl;
   }
 
@@ -183,12 +306,9 @@ Block* block_new(const uint8_t* data, size_t length) {
     free(bl);
     return NULL;
   }
-
-  // TODO check return value?
+  
   memcpy(bl->data, data, length); // copy data into the block
-
-  // write zeroes to the remaining part of the block
-  for (size_t i = length; i < BLOCK_MAX_LENGTH; i++) bl->data[i] = 0;
+  memset(bl->data + length, 0, BLOCK_MAX_LENGTH - length); // zero what's left
 
   return bl;
 }
@@ -196,21 +316,6 @@ Block* block_new(const uint8_t* data, size_t length) {
 void block_free(Block* bl) {
   if (!bl) return;
   free(bl);
-}
-
-// helper for writing the count to the header
-static int blockfile_write_count(BlockFile* bf) {
-  uint8_t count_bytes[4] = {
-    (uint8_t)(bf->count >> 24), (uint8_t)(bf->count >> 16),
-    (uint8_t)(bf->count >> 8),  (uint8_t)(bf->count)
-  };
-  
-  if (fseek(bf->fp, 3, SEEK_SET) != 0) return 0;
-  
-  if (fwrite(count_bytes, 1, 4, bf->fp) != 4) return 0;
-  
-  fflush(bf->fp);
-  return 1;
 }
 
 int block_append(BlockFile* bf, Block* bl) {
@@ -235,7 +340,7 @@ int block_append(BlockFile* bf, Block* bl) {
   return 1;
 }
 
-Block* block_read(BlockFile* bf, uint32_t number) {
+Block* block_read(const BlockFile* bf, uint32_t number) {
   if (!bf || !bf->fp) return NULL;
   if (number >= bf->count) return NULL;
   
@@ -254,7 +359,7 @@ Block* block_read(BlockFile* bf, uint32_t number) {
     return NULL; // io error
   }
   
-  // shouldn't happen with the guard check above, but might as well
+  // shouldn't happen with the guard above, but might as well
   if (read_bytes == 0) {
     free(bl);
     return NULL;
@@ -264,23 +369,36 @@ Block* block_read(BlockFile* bf, uint32_t number) {
   return bl;
 }
 
-int block_update(BlockFile* bf, Block* new) {
-  if (!bf || !bf->fp || !new) return 0;
-  if (new->number >= bf->count) return 0; // block doesn't exist
+int block_update(BlockFile* bf, Block* new_block) {
+  if (!bf || !bf->fp || !new_block) return 0;
+  if (new_block->number >= bf->count) return 0; // block doesn't exist
   
-  long offset = block_offset(new->number);
+  long offset = block_offset(new_block->number);
   if (fseek(bf->fp, offset, SEEK_SET) != 0) return 0;
   
-  if (fwrite(new->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
-    return 0;
-  }
+  if (
+    fwrite(new_block->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH
+  ) return 0;
   
   fflush(bf->fp);
   return 1;
 }
 
 int block_clear(BlockFile* bf, uint32_t number) {
-  // TODO
+  if (!bf) return 0;
+  if (number >= bf->count) return 0;
+
+  uint8_t* zeroes = calloc(1024, sizeof(uint8_t));
+  if (!zeroes) return 0;
+
+  Block* empty_block = block_new(NULL, 0);
+  if (!empty_block) return 0;
+
+  empty_block->number = number;
+  int ok = block_update(bf, empty_block);
+  block_free(empty_block);
+
+  return ok;
 }
 
 #endif // BLOCKS_IMPLEMENTATION
