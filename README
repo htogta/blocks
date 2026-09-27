@@ -1,0 +1,28 @@
+`blocks.h` is a header-only C library for interacting with `.blocks` files.
+
+A `.blocks` file is a binary file, containing nothing but an 8-byte header consisting of:
+
+- "bl" and a newline (magic number)
+- a 4-byte (unsigned big-endian 32-bit) "count" for the number of blocks in the file
+- a trailing newline
+
+This is then followed by a sequence of 1024-byte blocks (the amount is determined by the "count" in the header). The last block in the file doesn't have to be a full 1024 bytes.
+
+This C library uses these `.blocks` files to approximate the behavior of [Blocks in FORTH]. I originally created `blocks.h` to be used as the "disk" interface for a fantasy computer powered by the small virtual machine I've made, called [ok]. Other projects use a similar sort of interface (such as [Konilo]), so I decided to formalize my own version of it to use across my projects.
+
+[Blocks in FORTH]: https://wiki.c2.com/?ForthBlocks
+[ok]: https://github.com/htogta/ok
+[Konilo]: https://ilo.retroforth.org/
+
+Feel free to read the source code for a description of the API. As this is an STB-style header-only library, including it in your C code is done like so:
+
+```
+#define BLOCKS_IMPLEMENTATION
+#include "blocks.h"
+
+// the rest of your code goes here
+```
+
+`BLOCKS_IMPLEMENTATION` should only be defined in one place across your project, ideally in a file that doesn't need to be recompiled often. Any other files that need to access the API just need the `#include` line.
+
+
