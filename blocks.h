@@ -28,7 +28,7 @@ typedef struct {
 
 // Returns a human-readable string describing the last failure,
 // from any of the following API functions. Note that it isn't thread-safe.
-const char* blocks_failure_reason();
+const char* blocks_failure_reason(void);
 
 // Opens a new blockfile- if it doesn't exist, one is created.
 // Returns null on failure.
@@ -87,7 +87,7 @@ int block_clear(BlockFile* bf, uint32_t number);
 // most recent error stored here
 static const char* blocks_last_error = NULL;
 
-const char* blocks_failure_reason() {
+const char* blocks_failure_reason(void) {
   return blocks_last_error;
 }
 
@@ -133,7 +133,7 @@ static int blockfile_write_count(BlockFile* bf) {
 }
 
 BlockFile* blockfile_open(const char* path) {
-  if (!path) return blocks_fail_ptr("blockfile_open: path is empty");
+  if (!path) return blocks_fail_ptr("blockfile_open: path is NULL");
   
   FILE* fp = fopen(path, "r+b");
   int is_new = 0;
@@ -191,6 +191,36 @@ BlockFile* blockfile_open(const char* path) {
     // remember, BIG ENDIAN
     bf->count = ((uint32_t)header[3] << 24) | ((uint32_t)header[4] << 16) |
                 ((uint32_t)header[5] << 8)  |  (uint32_t)header[6];
+
+    // confirm the file is actually big enough to hold that many blocks
+    if (fseek(fp, 0, SEEK_END) != 0) {
+      fclose(fp);
+      free(bf->path);
+      free(bf);
+      return blocks_fail_ptr(
+        "blockfile_open: failed to seek to end of BlockFile");
+    }
+
+    long file_size = ftell(fp);
+    if (file_size < 0) {
+      fclose(fp);
+      free(bf->path);
+      free(bf);
+      return blocks_fail_ptr(
+        "blockfile_open: failed to determine BlockFile size");
+    }
+
+    if (bf->count > 0) {
+      // every block but the last may be full, the last needs at least 1 byte
+      long min_size = 8 + (long)(bf->count - 1) * BLOCK_MAX_LENGTH + 1;
+      if (file_size < min_size) {
+        fclose(fp);
+        free(bf->path);
+        free(bf);
+        return blocks_fail_ptr(
+          "blockfile_open: file is smaller than header claims");
+      }
+    }
   }
   
   return bf;
@@ -342,13 +372,13 @@ int blockfile_merge(BlockFile* to, const BlockFile* from) {
   }
 
   if (!to->fp) {
-    blocks_fail("blockfile_merge: source BlockFile's file pointer is NULL");
+    blocks_fail("blockfile_merge: destination BlockFile's file pointer is NULL");
     return -1;
   }
 
   if (!from->fp) {
     blocks_fail(
-      "blockfile_merge: destination BlockFile's file pointer is NULL");
+      "blockfile_merge: source BlockFile's file pointer is NULL");
     return -1;
   }
 
