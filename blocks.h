@@ -26,6 +26,10 @@ typedef struct {
   uint8_t data[BLOCK_MAX_LENGTH];
 } Block;
 
+// Returns a human-readable string describing the last failure,
+// from any of the following API functions. Note that it isn't thread-safe.
+const char* blocks_failure_reason();
+
 // Opens a new blockfile- if it doesn't exist, one is created.
 // Returns null on failure.
 BlockFile* blockfile_open(const char* path);
@@ -79,6 +83,27 @@ int block_clear(BlockFile* bf, uint32_t number);
 
 #include <stdlib.h>
 #include <string.h>
+
+// most recent error stored here
+static const char* blocks_last_error = NULL;
+
+const char* blocks_failure_reason() {
+  return blocks_last_error;
+}
+
+// records a reason, returns 0 - for int-returning functions
+static int blocks_fail(const char* reason) {
+  blocks_last_error = reason;
+  return 0;
+}
+
+// records a reason, returns NULL - for pointer-returning functions
+static void* blocks_fail_ptr(const char* reason) {
+  blocks_last_error = reason;
+  return NULL;
+}
+
+// TODO rework API functions to include these
 
 // calculating a block's offset in a blockfile from its number
 static inline long block_offset(uint32_t number) {
@@ -320,6 +345,7 @@ void block_free(Block* bl) {
 
 int block_append(BlockFile* bf, Block* bl) {
   if (!bf || !bl || !bf->fp) return 0;
+  if (bf->count == UINT32_MAX) return 0;
 
   bl->number = bf->count;
 
