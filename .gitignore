@@ -1,0 +1,12 @@
+# ignore binaries for test cases
+tests/test-open-new 
+tests/test-open-invalid 
+tests/test-append-read 
+tests/test-count-endian 
+tests/test-update-clear 
+tests/test-block-new 
+tests/test-short-last 
+tests/test-from-file 
+tests/test-clean 
+tests/test-merge 
+tests/test-fail-reason
