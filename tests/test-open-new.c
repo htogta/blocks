@@ -1,7 +1,6 @@
 #define BLOCKS_IMPLEMENTATION
 #include "../blocks.h"
 
-#include <stdio.h>
 #include <assert.h>
 #include <string.h>
 
