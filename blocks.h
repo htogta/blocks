@@ -65,6 +65,11 @@ void block_free(Block* bl);
 // returning truthy on success and falsy on failure.
 int block_append(BlockFile* bf, Block* bl);
 
+// Inserts a block at position bl->number, shifting the blocks after it ahead.
+// Returns truthy on success and falsy on failure.
+int block_insert(BlockFile* bf, Block* bl);
+// NOTE: This could potentially be rather slow, use sparingly
+
 // Allocates for a block,
 // and reads its data from a blockfile at a specific location (number).
 // Returns null on failure.
@@ -456,6 +461,71 @@ int block_append(BlockFile* bf, Block* bl) {
     bf->count--;
     return blocks_fail(
       "block_append: failed to write count to BlockFile header");
+  }
+
+  fflush(bf->fp);
+  return 1;
+}
+
+// TODO there's a way to rework this to use a stack buffer 
+// to minimize allocations/speed things up a little bit
+int block_insert(BlockFile* bf, Block* bl) {
+  if (!bf) return blocks_fail("block_insert: BlockFile is NULL");
+  if (!bl) return blocks_fail("block_insert: Block is NULL");
+
+  if (!bf->fp) {
+    return blocks_fail("block_insert: BlockFile file pointer is NULL");
+  }
+  
+  if (bl->number > bf->count) {
+    return blocks_fail("block_insert: cannot insert past end of BlockFile");
+  }
+
+  if (bf->count == UINT32_MAX) {
+    return blocks_fail("block_insert: BlockFile count overflow");
+  }
+
+  if (bl->number == bf->count) { // here we just append
+    return block_append(bf, bl);
+  }
+
+  uint32_t insert_at = bl->number;
+
+  // shift every block from the end down to the insertion point one pos later,
+  // going backwards so we don't overwrite a block before we've moved it
+  for (uint32_t i = bf->count; i > insert_at; i--) {
+    Block* moving = block_read(bf, i - 1);
+    if (!moving) return 0;
+
+    moving->number = i;
+    long offset = block_offset(i);
+    
+    if (fseek(bf->fp, offset, SEEK_SET) != 0) {
+      block_free(moving);
+      return blocks_fail("block_insert: failed to seek while shifting Block");
+    }
+
+    if (fwrite(moving->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
+      block_free(moving);
+      return blocks_fail("block_insert: failed to write Block while shifting");
+    }
+
+    block_free(moving);
+  }
+
+  // write new block into the slot we just freed up
+  long offset = block_offset(insert_at);
+  if (fseek(bf->fp, offset, SEEK_SET) != 0) {
+    return blocks_fail("block_insert: failed to seek to insertion point");
+  }
+  if (fwrite(bl->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
+    return blocks_fail("blocks_insert: failed to write new Block");
+  }
+  
+  bf->count++;
+  if (!blockfile_write_count(bf)) {
+    bf->count--;
+    return blocks_fail("block_insert: failed to update BlockFile header count");
   }
 
   fflush(bf->fp);
