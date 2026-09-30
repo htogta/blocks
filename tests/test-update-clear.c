@@ -17,7 +17,7 @@ static int block_is_zero(const Block* bl) {
 int main(void) {
   remove(PATH);
 
-  BlockFile* bf = blockfile_open(PATH);
+  BlockFile* bf = blockfile_create(PATH, 3);
   assert(bf != NULL);
   
   // fill a few blocks with some data
@@ -25,7 +25,8 @@ int main(void) {
   for (int i = 0; i < 3; i++) {
     Block* bl = block_new((const uint8_t*)contents[i], 3);
     assert(bl != NULL);
-    int ok = block_append(bf, bl);
+    bl->number = i;
+    int ok = block_update(bf, bl);
     assert(ok);
     block_free(bl);
   }
@@ -52,7 +53,7 @@ int main(void) {
   assert(memcmp(bl->data, "ccc", 3) == 0);
   block_free(bl);
 
-  // updating a block that doesn't exist fails, doesn't grow the file
+  // updating a block that doesn't exist (outside of capacity) fails
   Block* ghost = block_new((const uint8_t*)"zzz", 3);
   assert(ghost != NULL);
   ghost->number = 3;
@@ -62,7 +63,7 @@ int main(void) {
   assert(bf->count == 3);
   block_free(ghost);
 
-  // clearing block 2 zeroes it but keeps it in the file
+  // clearing block 2 zeroes it
   ok = block_clear(bf, 2);
   assert(ok);
   assert(bf->count == 3);

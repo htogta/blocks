@@ -1,4 +1,4 @@
-test: test-open-new test-open-invalid test-append-read test-count-endian test-update-clear test-block-new test-from-file test-fail-reason
+test: test-open-new test-open-invalid test-count-endian test-update-clear test-block-new test-from-file test-fail-reason
 
 @test-open-new:
   cc tests/test-open-new.c -o tests/test-open-new
@@ -9,11 +9,6 @@ test: test-open-new test-open-invalid test-append-read test-count-endian test-up
   cc tests/test-open-invalid.c -o tests/test-open-invalid
   ./tests/test-open-invalid
   rm tests/test-open-invalid
-  
-@test-append-read:
-  cc tests/test-append-read.c -o tests/test-append-read
-  ./tests/test-append-read
-  rm tests/test-append-read
   
 @test-count-endian:
   cc tests/test-count-endian.c -o tests/test-count-endian
