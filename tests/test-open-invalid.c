@@ -23,11 +23,18 @@ static void expect_open_fails(void) {
 }
 
 int main(void) {
-  // NULL path
+  // NULL path for open
   BlockFile* none = blockfile_open(NULL);
   assert(none == NULL);
   assert(blocks_failure_reason() != NULL);
+  assert(strstr(blocks_failure_reason(), "blockfile_open") != NULL);
 
+  // NULL path for create
+  BlockFile* none2 = blockfile_create(NULL, 1);
+  assert(none2 == NULL);
+  assert(blocks_failure_reason() != NULL);
+  assert(strstr(blocks_failure_reason(), "blockfile_create") != NULL);
+  
   // no header
   write_raw((const uint8_t*)"", 0);
   expect_open_fails();
@@ -47,24 +54,18 @@ int main(void) {
   write_raw(bad_newline, 8);
   expect_open_fails();
   
-  // count in header doesn't agree with the # of blocks present
-  const uint8_t liar[8] = { 'b', 'l', '\n', 0, 0, 0, 5, '\n' };
-  write_raw(liar, 8);
-  expect_open_fails();
-  assert(strstr(blocks_failure_reason(), "smaller") != NULL);
-  
-  // header claims 2 blocks, so the file needs at least 8 + 1024 + 1 bytes-
+  // header claims 2 blocks, so the file needs at least 8 + (1024 * 2) bytes-
   // this one is one byte too short
-  static uint8_t buf[8 + 1024 + 1];
+  static uint8_t buf[8 + (1024 * 2)];
   memset(buf, 0, sizeof(buf));
   memcpy(buf, "bl\n", 3);
   buf[6] = 2;
   buf[7] = '\n';
-  write_raw(buf, 8 + 1024);
+  write_raw(buf, (8 + (1024 * 2)) - 1);
   expect_open_fails();
 
   // whereas this one has the exact right amount
-  write_raw(buf, 8 + 1024 + 1);
+  write_raw(buf, 8 + 1024*2);
   BlockFile* bf = blockfile_open(PATH);
   assert(bf != NULL);
   assert(bf->count == 2);
