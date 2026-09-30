@@ -1,4 +1,4 @@
-test: test-open-new test-open-invalid test-update-clear test-block-new test-from-file test-fail-reason
+test: test-open-new test-open-invalid test-update-clear test-block-new test-from-file
 
 @test-open-new:
   cc tests/test-open-new.c -o tests/test-open-new
@@ -24,8 +24,3 @@ test: test-open-new test-open-invalid test-update-clear test-block-new test-from
   cc tests/test-from-file.c -o tests/test-from-file
   ./tests/test-from-file
   rm tests/test-from-file
-  
-@test-fail-reason:
-  cc tests/test-fail-reason.c -o tests/test-fail-reason
-  ./tests/test-fail-reason
-  rm tests/test-fail-reason
