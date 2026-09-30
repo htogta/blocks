@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#define BLOCKS_VERSION "0.1.0"
+
 // BlockFiles are expected to have a 8-byte header
 // first 3 bytes are "bl" and then a newline,
 // the next 4 bytes (BIG ENDIAN!) are the number of blocks in the file,
