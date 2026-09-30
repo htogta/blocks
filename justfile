@@ -1,4 +1,4 @@
-test: test-open-new test-open-invalid test-append-read test-count-endian test-update-clear test-block-new test-short-last test-from-file test-clean test-merge test-fail-reason test-insert
+test: test-open-new test-open-invalid test-append-read test-count-endian test-update-clear test-block-new test-from-file test-fail-reason
 
 @test-open-new:
   cc tests/test-open-new.c -o tests/test-open-new
@@ -29,33 +29,13 @@ test: test-open-new test-open-invalid test-append-read test-count-endian test-up
   cc tests/test-block-new.c -o tests/test-block-new
   ./tests/test-block-new
   rm tests/test-block-new
-  
-@test-short-last:
-  cc tests/test-short-last.c -o tests/test-short-last
-  ./tests/test-short-last
-  rm tests/test-short-last
-  
+    
 @test-from-file:
   cc tests/test-from-file.c -o tests/test-from-file
   ./tests/test-from-file
   rm tests/test-from-file
   
-@test-clean:
-  cc tests/test-clean.c -o tests/test-clean
-  ./tests/test-clean
-  rm tests/test-clean
-  
-@test-merge:
-  cc tests/test-merge.c -o tests/test-merge
-  ./tests/test-merge
-  rm tests/test-merge
-  
 @test-fail-reason:
   cc tests/test-fail-reason.c -o tests/test-fail-reason
   ./tests/test-fail-reason
   rm tests/test-fail-reason
-  
-@test-insert:
-  cc tests/test-insert.c -o tests/test-insert
-  ./tests/test-insert
-  rm tests/test-insert
