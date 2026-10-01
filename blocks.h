@@ -5,80 +5,67 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#define BLOCKS_VERSION "0.1.0"
+#define BLOCKS_VERSION "1.0.0-beta"
 
-// BlockFiles are expected to have a 8-byte header
-// first 3 bytes are "bl" and then a newline,
-// the next 4 bytes (BIG ENDIAN!) are the number of blocks in the file,
-// followed by another newline.
-// Each block is 1024 bytes, 
-// but the last block in the file doesn't have to be 
-// (BUT it must be at least 1 byte).
+// BlockFiles are expected to have a 8-byte header. The first 3 bytes are "bl"
+// and then a newline, the next 4 bytes (BIG ENDIAN!) are the number of blocks
+// in the file, followed by another newline. Each block is 1024 bytes.
 typedef struct {
   char* path;
-  uint32_t count;
+  uint32_t count; // number of blocks that fit in the file (capacity)
   FILE* fp;
 } BlockFile;
 
 #define BLOCK_MAX_LENGTH (1024)
 
-// When a block is read from a file, it's always treated like it's 1024 bytes.
 typedef struct {
   uint32_t number;
   uint8_t data[BLOCK_MAX_LENGTH];
 } Block;
 
-// Returns a human-readable string describing the last failure,
-// from any of the following API functions. Note that it isn't thread-safe.
+// Returns a human-readable string describing the last failure, from any of the
+// following API functions. Note that it isn't thread-safe.
 const char* blocks_failure_reason(void);
 
-// Opens a new blockfile- if it doesn't exist, one is created.
+// Creates a new BlockFile at "path" with a fixed capacity of "capacity" 
+// blocks, all implicitly zeroed. The file is sparse; its logical size 
+// immediately reflects the full capacity, but no disk space is actually used
+// until a given Block is written to.
+// Returns NULL if a file already exists at "path", or if another error occurs.
+BlockFile* blockfile_create(const char* path, uint32_t capacity);
+
+// Opens an (existing) file as a BlockFile (heap-allocated).
 // Returns null on failure.
 BlockFile* blockfile_open(const char* path);
 
-// Creates a new BlockFile (at "dest") and populates it with blocks
-// using the contents of another regular file (at "src_path") as the data.
-BlockFile* blockfile_from_file(const char* dest, const char* src_path);
+// Reads the contents of a file at "path" and writes it into "dest", starting
+// at block "start". If the file doesn't fit evenly into blocks, the last block
+// of the file's contents will be padded with zeroes at the end.
+// Fails if the data doesn't fit within dest's remaining capacity, or if any 
+// target block doesn't already read as entirely zero (so we don't overwrite
+// existing data).
+// Returns truthy on success, falsy on failure.
+int blockfile_load_file(BlockFile* dest, uint32_t start, const char* path);
 
 // Closes (and frees) a blockfile.
 void blockfile_close(BlockFile* bf);
 
-// Removes all empty blocks, updating bf->count.
-// Returns the number of removed blocks on success (>= 0), or -1 on failure.
-int blockfile_clean(BlockFile* bf);
-// I would be careful using this function, 
-// as it won't preserve the relative positions of blocks.
-// Think of it like defragmenting a hard drive.
-
-// Copies the blocks from one file ("from") 
-// and appends them to the end of another ("to").
-// Returns the number of blocks appended, or -1 on failure
-int blockfile_merge(BlockFile* to, const BlockFile* from);
-
-// Creates a new block (with default number 0), returning null on failure.
-// You can create an empty block with block_new(NULL, 0).
-// The block is allocated on the heap.
+// Creates a new block (with default number 0), returning null on failure. You
+// can create an empty block with block_new(NULL, 0). The block is allocated on
+// the heap.
 Block* block_new(const uint8_t* data, size_t length);
 
 // Frees a block from memory.
 void block_free(Block* bl);
 
-// Appends a block to the end of the blockfile,
-// returning truthy on success and falsy on failure.
-int block_append(BlockFile* bf, Block* bl);
-
-// Inserts a block at position bl->number, shifting the blocks after it ahead.
-// Returns truthy on success and falsy on failure.
-int block_insert(BlockFile* bf, Block* bl);
-// NOTE: This could potentially be rather slow, use sparingly
-
-// Allocates for a block,
-// and reads its data from a blockfile at a specific location (number).
+// Allocates memory for a block, and reads its data from a blockfile at a
+// specific location (number). number must be < bf->count. A block that's never
+// been written to reads back as all zeroes.
 // Returns null on failure.
 Block* block_read(const BlockFile* bf, uint32_t number);
 
-// Overwrites a block at a specific location in a blockfile.
-// The location is determined by new_block->number.
+// Overwrites a block at a specific location in a blockfile. The location is
+// determined by new_block->number, which must be < bf->count.
 // Returns truthy upon success and falsy upon failure.
 int block_update(BlockFile* bf, Block* new_block);
 
@@ -114,6 +101,8 @@ static void* blocks_fail_ptr(const char* reason) {
 static inline long block_offset(uint32_t number) {
   return 8 + (long)number * BLOCK_MAX_LENGTH;
 }
+// ^ TODO this has a chance of overflowing if the blockfile's capacity is
+// really high, specifically on a system where sizeof(long) is less than 8
 
 // since strdup isn't actually in the C99 standard
 static char* blocks_strdup(const char* s) {
@@ -139,20 +128,98 @@ static int blockfile_write_count(BlockFile* bf) {
   return 1;
 }
 
+// helper for checking that a block is empty
+static int block_is_empty(const Block* bl) {
+  for (size_t i = 0; i < BLOCK_MAX_LENGTH; i++) {
+    if (bl->data[i] != 0) return 0;
+  }
+  return 1;
+}
+
+BlockFile* blockfile_create(const char* path, uint32_t capacity) {
+  if (!path) return blocks_fail_ptr("blockfile_create: path is NULL");
+  
+  FILE* existing = fopen(path, "rb");
+  if (existing) {
+    fclose(existing);
+    return blocks_fail_ptr("blockfile_create: file already exists");
+  }
+  
+  FILE* fp = fopen(path, "w+b");
+  if (!fp) return blocks_fail_ptr("blockfile_create: failed to create file");
+  
+  BlockFile* bf = malloc(sizeof(BlockFile));
+  if (!bf) {
+    fclose(fp);
+    remove(path);
+    return blocks_fail_ptr(
+      "blockfile_create: failed to allocate memory for BlockFile");
+  }
+  
+  bf->path = blocks_strdup(path);
+  if (!bf->path) {
+    fclose(fp);
+    free(bf);
+    remove(path);
+    return blocks_fail_ptr(
+      "blockfile_create: failed to allocate memory for path");
+  }
+  
+  bf->fp = fp;
+  bf->count = capacity;
+
+  // big-endian
+  uint8_t header[8] = {
+    'b', 'l', '\n',
+    (uint8_t)(capacity >> 24), (uint8_t)(capacity >> 16),
+    (uint8_t)(capacity >> 8),  (uint8_t)(capacity),
+    '\n'
+  };
+  
+  if (fwrite(header, 1, 8, fp) != 8) {
+    fclose(fp);
+    free(bf->path);
+    free(bf);
+    remove(path);
+    return blocks_fail_ptr("blockfile_create: failed to write header");
+  }
+  
+  if (capacity > 0) {
+    // establish the file's full logical size without allocating disk space 
+    // seek to the very last byte the capacity implies
+    long last_byte = 8 + (long)capacity * BLOCK_MAX_LENGTH - 1;
+    if (fseek(fp, last_byte, SEEK_SET) != 0) {
+      fclose(fp);
+      free(bf->path);
+      free(bf);
+      remove(path);
+      return blocks_fail_ptr(
+        "blockfile_create: failed to seek while sizing BlockFile");
+    }
+    
+    // write one byte there
+    if (fputc(0, fp) == EOF) {
+      fclose(fp);
+      free(bf->path);
+      free(bf);
+      remove(path);
+      return blocks_fail_ptr("blockfile_create: failed to size BlockFile");
+    }
+
+    // On mainstream filesystems, this leaves everything before it as a "hole"
+    // rather than actually allocating the space. TODO Even though it's safe
+    // to assume this is the case, it'd be nice if we didn't have to.
+  }
+
+  fflush(fp);
+  return bf;
+}
+
 BlockFile* blockfile_open(const char* path) {
   if (!path) return blocks_fail_ptr("blockfile_open: path is NULL");
   
   FILE* fp = fopen(path, "r+b");
-  int is_new = 0;
-  if (!fp) { // create if doesn't exist yet
-    fp = fopen(path, "w+b");
-    
-    if (!fp) {
-      return blocks_fail_ptr("blockfile_open: failed to create new file");
-    }
-     
-    is_new = 1;
-  }
+  if (!fp) return blocks_fail_ptr("blockfile_open: failed to create new file");
   
   BlockFile* bf = malloc(sizeof(BlockFile));
   if (!bf) {
@@ -170,124 +237,143 @@ BlockFile* blockfile_open(const char* path) {
   }
   
   bf->fp = fp;
+
+  uint8_t header[8];
+  rewind(fp);
+  if (
+    fread(header, 1, 8, fp) != 8 || header[0] != 'b' || header[1] != 'l' ||
+    header[2] != '\n' || header[7] != '\n'
+  ) {
+    fclose(fp);
+    free(bf->path);
+    free(bf);
+    return blocks_fail_ptr("blockfile_open: malformed header");
+  }
   
-  if (is_new) {
-    bf->count = 0;
-    
-    uint8_t header[8] = { 'b', 'l', '\n', 0, 0, 0, 0, '\n' };
-    if (fwrite(header, 1, 8, fp) != 8) {
-      fclose(fp);
-      free(bf->path);
-      free(bf);
-      return blocks_fail_ptr("blockfile_open: failed to write header");
-    }
-    fflush(fp);
-  } else {
-    uint8_t header[8];
-
-    rewind(fp);
-    if (fread(header, 1, 8, fp) != 8 ||
-        header[0] != 'b' || header[1] != 'l' ||
-        header[2] != '\n' || header[7] != '\n') {
-      fclose(fp);
-      free(bf->path);
-      free(bf);
-      return blocks_fail_ptr("blockfile_open: malformed header");
-    }
-
-    // remember, BIG ENDIAN
-    bf->count = ((uint32_t)header[3] << 24) | ((uint32_t)header[4] << 16) |
-                ((uint32_t)header[5] << 8)  |  (uint32_t)header[6];
-
-    // confirm the file is actually big enough to hold that many blocks
-    if (fseek(fp, 0, SEEK_END) != 0) {
-      fclose(fp);
-      free(bf->path);
-      free(bf);
-      return blocks_fail_ptr(
-        "blockfile_open: failed to seek to end of BlockFile");
-    }
-
-    long file_size = ftell(fp);
-    if (file_size < 0) {
-      fclose(fp);
-      free(bf->path);
-      free(bf);
-      return blocks_fail_ptr(
-        "blockfile_open: failed to determine BlockFile size");
-    }
-
-    if (bf->count > 0) {
-      // every block but the last may be full, the last needs at least 1 byte
-      long min_size = 8 + (long)(bf->count - 1) * BLOCK_MAX_LENGTH + 1;
-      if (file_size < min_size) {
-        fclose(fp);
-        free(bf->path);
-        free(bf);
-        return blocks_fail_ptr(
-          "blockfile_open: file is smaller than header claims");
-      }
-    }
+  // remember, BIG ENDIAN
+  bf->count = ((uint32_t)header[3] << 24) | ((uint32_t)header[4] << 16) |
+              ((uint32_t)header[5] << 8)  |  (uint32_t)header[6];
+  
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    free(bf->path);
+    free(bf);
+    return blocks_fail_ptr(
+      "blockfile_open: failed to seek to end of BlockFile");
+  }
+  
+  long file_size = ftell(fp);
+  if (file_size < 0) {
+    fclose(fp);
+    free(bf->path);
+    free(bf);
+    return blocks_fail_ptr(
+      "blockfile_open: failed to determine BlockFile size");
+  }
+  
+  long expected_size = 8 + (long)bf->count * BLOCK_MAX_LENGTH;
+  if (file_size != expected_size) {
+    fclose(fp);
+    free(bf->path);
+    free(bf);
+    return blocks_fail_ptr(
+      "blockfile_open: file size doesn't match its declared capacity");
   }
   
   return bf;
 }
 
-BlockFile* blockfile_from_file(const char* dest, const char* src_path) {
-  if (!dest || !src_path) return NULL;
-
-  FILE* existing = fopen(dest, "rb");
-  if (existing) {
-    // dest already exists, so don't touch it
-    fclose(existing);
-    return blocks_fail_ptr("blockfile_from_file: dest file already exists");
+int blockfile_load_file(BlockFile* dest, uint32_t start, const char* path) {
+  if (!dest) return blocks_fail("blockfile_load_file: dest is NULL");
+  
+  if (!dest->fp) {
+    return blocks_fail("blockfile_load_file: dest's file pointer is NULL");
   }
-
-  FILE* src = fopen(src_path, "rb");
+  
+  if (!path) return blocks_fail("blockfile_load_file: path is NULL");
+  
+  if (start > dest->count) {
+    return blocks_fail("blockfile_load_file: start is out of range");
+  }
+  
+  FILE* src = fopen(path, "rb");
   if (!src) {
-    return blocks_fail_ptr("blockfile_from_file: failed to open src_path");
+    return blocks_fail("blockfile_load_file: failed to open file at path");
   }
-
-  // NOTE: there's potential for a race condition here if, between running the
-  // above code and the code immediately below this, the file at "dest" is 
-  // created. I don't think that's a scenario I'd run into with my typical use
-  // of this library, but it's worth mentioning.
-
-  BlockFile* bf = blockfile_open(dest);
-  if (!bf) {
+  
+  if (fseek(src, 0, SEEK_END) != 0) {
     fclose(src);
-    return NULL; // blockfile_open already set a specific reason
+    return blocks_fail(
+      "blockfile_load_file: failed to seek to end of file at path");
   }
-
+  
+  long src_size = ftell(src);
+  if (src_size < 0) {
+    fclose(src);
+    return blocks_fail(
+      "blockfile_load_file: failed to determine size of file at path");
+  }
+  rewind(src);
+  
+  // how many blocks the source needs (rounds up)
+  uint32_t needed =
+    (uint32_t)((src_size + BLOCK_MAX_LENGTH - 1) / BLOCK_MAX_LENGTH);
+  
+  uint32_t remaining_capacity = dest->count - start;
+  if (needed > remaining_capacity) {
+    fclose(src);
+    return blocks_fail(
+    "blockfile_load_file: file at path doesn't fit in dest's remaining capacity"
+    );
+  }
+  
+  // don't overwrite existing data (make sure blocks read as all zeroes)
+  for (uint32_t i = 0; i < needed; i++) {
+    Block* existing = block_read(dest, start + i);
+    if (!existing) {
+      fclose(src);
+      return 0; // reason set by block_read
+    }
+    
+    int empty = block_is_empty(existing);
+    block_free(existing);
+    
+    if (!empty) {
+      fclose(src);
+      return blocks_fail(
+        "blockfile_load_file: a target block already has data in it");
+    }
+  }
+  
+  uint32_t number = start;
   uint8_t buffer[BLOCK_MAX_LENGTH];
   size_t read_bytes;
   while ((read_bytes = fread(buffer, 1, BLOCK_MAX_LENGTH, src)) > 0) {
     Block* bl = block_new(buffer, read_bytes);
     if (!bl) {
       fclose(src);
-      blockfile_close(bf);
-      return NULL; // reason set by block_new
+      return 0; // reason set by block_new
     }
-
-    if (!block_append(bf, bl)) {
-      block_free(bl);
-      fclose(src);
-      blockfile_close(bf);
-      return NULL; // reason set by block_append
-    }
-
+    
+    bl->number = number;
+    int ok = block_update(dest, bl);
     block_free(bl);
+    
+    if (!ok) {
+      fclose(src);
+      return 0; // reason set by block_update
+    }
+    
+    number++;
   }
-
+  
   if (ferror(src)) {
     fclose(src);
-    blockfile_close(bf);
-    return blocks_fail_ptr(
-      "blockfile_from_file: I/O error reading file at src_path");
+    return blocks_fail("blockfile_load_file: I/O error reading file at path");
   }
-
+  
   fclose(src);
-  return bf;
+  return 1;
 }
 
 void blockfile_close(BlockFile* bf) {
@@ -299,106 +385,6 @@ void blockfile_close(BlockFile* bf) {
   if (bf->fp) fclose(bf->fp);
   free(bf->path);
   free(bf);
-}
-
-// helper for checking that a block is empty
-static int block_is_empty(const Block* bl) {
-  for (size_t i = 0; i < BLOCK_MAX_LENGTH; i++) {
-    if (bl->data[i] != 0) return 0;
-  }
-  return 1;
-}
-
-int blockfile_clean(BlockFile* bf) {
-  if (!bf) {
-    blocks_fail("blockfile_clean: BlockFile is NULL");
-    return -1;
-  }
-  
-  if (!bf->fp) {
-    blocks_fail("blockfile_clean: BlockFile file pointer is NULL");
-    return -1;
-  } 
-
-  uint32_t write_index = 0;
-  int removed = 0;
-
-  for (uint32_t read_index = 0; read_index < bf->count; read_index++) {
-    Block* bl = block_read(bf, read_index);
-    if (!bl) return -1; // reason set by block_read
-
-    if (block_is_empty(bl)) {
-      removed++;
-      block_free(bl);
-      continue;
-    }
-
-    if (write_index != read_index) {
-      // shift this block down to close the gap
-      long offset = block_offset(write_index);
-      if (fseek(bf->fp, offset, SEEK_SET) != 0 ||
-          fwrite(bl->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
-        block_free(bl);
-        blocks_fail(
-          "blockfile_clean: failed to shift Block after clearing previous Block"
-        );
-        return -1;
-      }
-    }
-
-    write_index++;
-    block_free(bl);
-  }
-
-  fflush(bf->fp);
-
-  bf->count = write_index;
-  if (!blockfile_write_count(bf)) {
-    blocks_fail("blockfile_clean: failed to write count to BlockFile header");
-    return -1;
-  } 
-
-  return removed;
-}
-
-int blockfile_merge(BlockFile* to, const BlockFile* from) {
-  if (!to) {
-    blocks_fail("blockfile_merge: destination BlockFile is NULL");
-    return -1;
-  }
-
-  if (!from) {
-    blocks_fail("blockfile_merge: source BlockFile is NULL");
-    return -1;
-  }
-
-  if (!to->fp) {
-    blocks_fail("blockfile_merge: destination BlockFile's file pointer is NULL");
-    return -1;
-  }
-
-  if (!from->fp) {
-    blocks_fail(
-      "blockfile_merge: source BlockFile's file pointer is NULL");
-    return -1;
-  }
-
-  uint32_t original_count = from->count;
-  uint32_t appended = 0;
-
-  for (uint32_t i = 0; i < original_count; i++) {
-    Block* bl = block_read(from, i);
-    if (!bl) return -1; // reason set by block_read
-
-    int ok = block_append(to, bl);
-    block_free(bl);
-
-    if (!ok) return -1; // reason set by block_append
-    
-    appended++;
-  }
-
-  return (int)appended;
 }
 
 Block* block_new(const uint8_t* data, size_t length) {
@@ -435,105 +421,6 @@ void block_free(Block* bl) {
   free(bl);
 }
 
-int block_append(BlockFile* bf, Block* bl) {
-  if (!bf) return blocks_fail("block_append: BlockFile is NULL");
-  if (!bl) return blocks_fail("block_append: Block is NULL");
-  
-  if (!bf->fp) {
-    return blocks_fail("block_append: BlockFile's file pointer is NULL");
-  } 
-  
-  if (bf->count == UINT32_MAX) {
-    return blocks_fail("block_append: BlockFile count overflow");
-  } 
-
-  bl->number = bf->count;
-
-  long offset = block_offset(bl->number);
-  if (fseek(bf->fp, offset, SEEK_SET) != 0) {
-    return blocks_fail("block_append: failed to seek to end of BlockFile");
-  }
-
-  if (fwrite(bl->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
-    return blocks_fail("block_append: failed to write new Block to BlockFile");
-  }
-
-  bf->count++;
-  if (!blockfile_write_count(bf)) {
-    bf->count--;
-    return blocks_fail(
-      "block_append: failed to write count to BlockFile header");
-  }
-
-  fflush(bf->fp);
-  return 1;
-}
-
-// TODO there's a way to rework this to use a stack buffer 
-// to minimize allocations/speed things up a little bit
-int block_insert(BlockFile* bf, Block* bl) {
-  if (!bf) return blocks_fail("block_insert: BlockFile is NULL");
-  if (!bl) return blocks_fail("block_insert: Block is NULL");
-
-  if (!bf->fp) {
-    return blocks_fail("block_insert: BlockFile file pointer is NULL");
-  }
-  
-  if (bl->number > bf->count) {
-    return blocks_fail("block_insert: cannot insert past end of BlockFile");
-  }
-
-  if (bf->count == UINT32_MAX) {
-    return blocks_fail("block_insert: BlockFile count overflow");
-  }
-
-  if (bl->number == bf->count) { // here we just append
-    return block_append(bf, bl);
-  }
-
-  uint32_t insert_at = bl->number;
-
-  // shift every block from the end down to the insertion point one pos later,
-  // going backwards so we don't overwrite a block before we've moved it
-  for (uint32_t i = bf->count; i > insert_at; i--) {
-    Block* moving = block_read(bf, i - 1);
-    if (!moving) return 0;
-
-    moving->number = i;
-    long offset = block_offset(i);
-    
-    if (fseek(bf->fp, offset, SEEK_SET) != 0) {
-      block_free(moving);
-      return blocks_fail("block_insert: failed to seek while shifting Block");
-    }
-
-    if (fwrite(moving->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
-      block_free(moving);
-      return blocks_fail("block_insert: failed to write Block while shifting");
-    }
-
-    block_free(moving);
-  }
-
-  // write new block into the slot we just freed up
-  long offset = block_offset(insert_at);
-  if (fseek(bf->fp, offset, SEEK_SET) != 0) {
-    return blocks_fail("block_insert: failed to seek to insertion point");
-  }
-  if (fwrite(bl->data, 1, BLOCK_MAX_LENGTH, bf->fp) != BLOCK_MAX_LENGTH) {
-    return blocks_fail("blocks_insert: failed to write new Block");
-  }
-  
-  bf->count++;
-  if (!blockfile_write_count(bf)) {
-    bf->count--;
-    return blocks_fail("block_insert: failed to update BlockFile header count");
-  }
-
-  fflush(bf->fp);
-  return 1;
-}
-
 Block* block_read(const BlockFile* bf, uint32_t number) {
   if (!bf) return blocks_fail_ptr("block_read: BlockFile is NULL");
   
@@ -554,7 +441,6 @@ Block* block_read(const BlockFile* bf, uint32_t number) {
   Block* bl = malloc(sizeof(Block));
   if (!bl) return blocks_fail_ptr("block_read: failed to allocate Block");
   
-  // in case this is a short final block on disk
   memset(bl->data, 0, BLOCK_MAX_LENGTH);
   
   size_t read_bytes = fread(bl->data, 1, BLOCK_MAX_LENGTH, bf->fp);

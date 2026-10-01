@@ -22,10 +22,15 @@ int main(void) {
   
   remove(DEST);
   make_src(2500, data);
-  
-  BlockFile* bf = blockfile_from_file(DEST, SRC);
+
+  // first make a blockfile big enough to fit src
+  BlockFile* bf = blockfile_create(DEST, 3);
   assert(bf != NULL);
   assert(bf->count == 3);
+
+  // now load the file
+  int ok = blockfile_load_file(bf, 0, SRC);
+  assert(ok);
   
   // now we go through each block and make sure they match what's in data
   Block* bl = block_read(bf, 0);
@@ -43,33 +48,42 @@ int main(void) {
   assert(memcmp(bl->data, data + 2048, 452) == 0);
   for (int i = 452; i < BLOCK_MAX_LENGTH; i++) assert(bl->data[i] == 0);
   block_free(bl);
-  blockfile_close(bf);
-  
-  // it refuses to overwrite a dest that already exists,
-  // and leaves the existing file alone ("or else it gets the hose again")
-  BlockFile* again = blockfile_from_file(DEST, SRC);
-  assert(again == NULL);
-  assert(blocks_failure_reason() != NULL);
-  
-  bf = blockfile_open(DEST);
-  assert(bf != NULL);
-  assert(bf->count == 3);
+
+  // now make sure we can't overwrite the data
+  ok = blockfile_load_file(bf, 0, SRC); // should fail, nonzero'd blocks
+  assert(!ok);
+
+  // check that we can't load the data if there's not enough remaining blocks
+  ok = blockfile_load_file(bf, 1, SRC);
+  assert(!ok);
   blockfile_close(bf);
   remove(DEST);
   
-  // an exact multiple of the block size shouldn't produce a trailing block
-  make_src(2048, data);
-  bf = blockfile_from_file(DEST, SRC);
-  assert(bf != NULL);
+  // create another file that doesn't have enough space
+  bf = blockfile_create(DEST, 2);
+  assert(bf != NULL); 
   assert(bf->count == 2);
+  ok = blockfile_load_file(bf, 0, SRC);
+  assert(!ok);
+  
+  // an exact multiple of the block size shouldn't produce a trailing block
+  // so this shouldn't fail
+  remove(SRC);
+  make_src(2048, data);
+  ok = blockfile_load_file(bf, 0, SRC);
+  assert(ok);
+  
   blockfile_close(bf);
   remove(DEST);
   
   // one byte over spills into a new block
-  make_src(1025, data);
-  bf = blockfile_from_file(DEST, SRC);
+  bf = blockfile_create(DEST, 2);
   assert(bf != NULL);
-  assert(bf->count == 2);
+  
+  make_src(1025, data);
+  ok = blockfile_load_file(bf, 0, SRC);
+  assert(ok);
+  
   bl = block_read(bf, 1);
   assert(bl != NULL);
   assert(bl->data[0] == data[1024]);
@@ -79,26 +93,35 @@ int main(void) {
   remove(DEST);
   
   // an empty source file gives an empty blockfile
+  bf = blockfile_create(DEST, 2);
   make_src(0, data);
-  bf = blockfile_from_file(DEST, SRC);
-  assert(bf != NULL);
-  assert(bf->count == 0);
+  ok = blockfile_load_file(bf, 0, SRC);
+  assert(ok);
+
+  bl = block_read(bf, 0);
+  for (int i = 0; i < BLOCK_MAX_LENGTH; i++) assert(bl->data[i] == 0);
+  block_free(bl);
+  
   blockfile_close(bf);
   remove(DEST);
   
   // a missing source file fails, without creating dest
   remove(SRC);
-  bf = blockfile_from_file(DEST, SRC);
-  assert(bf == NULL);
+
+  bf = blockfile_create(DEST, 2);
+  assert(bf != NULL);
+  ok = blockfile_load_file(bf, 0, SRC);
+  assert(!ok);
   assert(blocks_failure_reason() != NULL);
-  FILE* fp = fopen(DEST, "rb");
-  assert(fp == NULL);
   
   // NULL args
-  bf = blockfile_from_file(NULL, SRC);
-  assert(bf == NULL);
-  bf = blockfile_from_file(DEST, NULL);
-  assert(bf == NULL);
+  ok = blockfile_load_file(NULL, 0, SRC);
+  assert(!ok);
+  ok = blockfile_load_file(bf, 0, NULL);
+  assert(!ok);
+
+  blockfile_close(bf);
+  remove(DEST);
 
   printf("...test-from-file PASSED\n");
   return 0;
